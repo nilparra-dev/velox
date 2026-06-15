@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,5 +86,64 @@ func TestDownloadSegmentNilProgress(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if !bytes.Equal(got, data) {
 		t.Error("nil-progress download produced wrong bytes")
+	}
+}
+
+func noRangeServer(data []byte) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(http.StatusOK) // ignores Range
+		_, _ = w.Write(data)
+	}))
+}
+
+func TestRunRangedParallel(t *testing.T) {
+	data := makeData(1 << 20) // 1 MiB
+	srv := rangedServer(data)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "result.bin")
+	res, err := Run(context.Background(), Options{
+		URL:         srv.URL + "/file.bin",
+		Output:      out,
+		Connections: 4,
+		Client:      srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Ranged || res.Connections != 4 {
+		t.Errorf("Ranged=%v Connections=%d, want true/4", res.Ranged, res.Connections)
+	}
+	got, _ := os.ReadFile(out)
+	if !bytes.Equal(got, data) {
+		t.Errorf("output bytes differ from source")
+	}
+	if _, err := os.Stat(out + ".part"); !os.IsNotExist(err) {
+		t.Errorf(".part file was not removed after finalize")
+	}
+}
+
+func TestRunSingleStreamFallback(t *testing.T) {
+	data := makeData(64 * 1024)
+	srv := noRangeServer(data)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "result.bin")
+	res, err := Run(context.Background(), Options{
+		URL:         srv.URL + "/blob",
+		Output:      out,
+		Connections: 4, // requested, but server has no ranges
+		Client:      srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Ranged || res.Connections != 1 {
+		t.Errorf("Ranged=%v Connections=%d, want false/1", res.Ranged, res.Connections)
+	}
+	got, _ := os.ReadFile(out)
+	if !bytes.Equal(got, data) {
+		t.Errorf("fallback output bytes differ from source")
 	}
 }
