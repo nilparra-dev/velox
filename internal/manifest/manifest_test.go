@@ -86,3 +86,43 @@ func TestLoadCorrupt(t *testing.T) {
 		t.Error("Load of corrupt manifest should return an error")
 	}
 }
+
+func TestConcurrentSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.dm")
+	m := New(path, &probe.RemoteInfo{URL: "http://x/f", Size: 1000}, 100)
+	m.MarkDone(1)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- m.Save() }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Save failed: %v", err)
+		}
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("temp file left behind")
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after concurrent saves: %v", err)
+	}
+	if !loaded.IsDone(1) {
+		t.Error("manifest content lost after concurrent saves")
+	}
+}
+
+func TestLoadWrongVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v999.dm")
+	if err := os.WriteFile(path, []byte(`{"version":999,"size":10}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("Load of a future-version manifest should return an error")
+	}
+}

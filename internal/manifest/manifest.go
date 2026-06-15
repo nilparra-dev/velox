@@ -108,16 +108,18 @@ func (m *Manifest) Validate(info *probe.RemoteInfo) bool {
 	return true
 }
 
-// Save atomically writes the manifest (tmp file + rename).
+// Save atomically writes the manifest (tmp file + rename). It holds the lock
+// for the whole operation so concurrent Save calls serialize rather than
+// colliding on the shared temp path.
 func (m *Manifest) Save() error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Completed = make([]int, 0, len(m.done))
 	for i := range m.done {
 		m.Completed = append(m.Completed, i)
 	}
 	sort.Ints(m.Completed)
 	data, err := json.MarshalIndent(m, "", "  ")
-	m.mu.Unlock()
 	if err != nil {
 		return err
 	}
