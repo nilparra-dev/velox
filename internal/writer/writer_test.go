@@ -16,16 +16,30 @@ func TestNewPreallocatesAndConcurrentWriteAt(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
+	// Assert pre-allocation: file should already be size bytes after New.
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatalf("stat after New: %v", err)
+	} else if fi.Size() != size {
+		t.Fatalf("pre-allocated size = %d, want %d", fi.Size(), size)
+	}
+
 	// Two goroutines writing non-overlapping halves concurrently.
 	half := make([]byte, size/2)
 	for i := range half {
 		half[i] = byte(i)
 	}
 	var wg sync.WaitGroup
+	errc := make(chan error, 2)
 	wg.Add(2)
-	go func() { defer wg.Done(); w.WriteAt(half, 0) }()
-	go func() { defer wg.Done(); w.WriteAt(half, size/2) }()
+	go func() { defer wg.Done(); _, err := w.WriteAt(half, 0); errc <- err }()
+	go func() { defer wg.Done(); _, err := w.WriteAt(half, size/2); errc <- err }()
 	wg.Wait()
+	close(errc)
+	for err := range errc {
+		if err != nil {
+			t.Fatalf("WriteAt: %v", err)
+		}
+	}
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

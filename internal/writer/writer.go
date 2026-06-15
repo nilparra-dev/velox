@@ -1,6 +1,11 @@
 package writer
 
-import "os"
+import (
+	"io"
+	"os"
+)
+
+var _ io.WriterAt = (*Writer)(nil)
 
 // Writer owns a file pre-allocated to its final size so that concurrent
 // WriteAt calls to non-overlapping regions land at fixed offsets.
@@ -10,7 +15,7 @@ type Writer struct {
 
 // New creates (or truncates) path and pre-allocates it to size bytes.
 func New(path string, size int64) (*Writer, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}
