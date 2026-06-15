@@ -47,7 +47,9 @@ func TestDownloadSegmentWritesAtOffset(t *testing.T) {
 	if err := downloadSegment(context.Background(), srv.Client(), srv.URL+"/file.bin", seg, w, prog); err != nil {
 		t.Fatalf("downloadSegment: %v", err)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("w.Close: %v", err)
+	}
 
 	if progressed != 100 {
 		t.Errorf("progress = %d, want 100", progressed)
@@ -55,5 +57,33 @@ func TestDownloadSegmentWritesAtOffset(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if !bytes.Equal(got[100:200], data[100:200]) {
 		t.Errorf("bytes [100:200] mismatch")
+	}
+	if !bytes.Equal(got[:100], make([]byte, 100)) {
+		t.Error("bytes before the segment are non-zero (wrote at wrong offset)")
+	}
+	if !bytes.Equal(got[200:], make([]byte, len(got)-200)) {
+		t.Error("bytes after the segment are non-zero (wrote past the range)")
+	}
+}
+
+func TestDownloadSegmentNilProgress(t *testing.T) {
+	data := makeData(1024)
+	srv := rangedServer(data)
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "out.bin")
+	w, err := writer.New(path, int64(len(data)))
+	if err != nil {
+		t.Fatalf("writer.New: %v", err)
+	}
+	defer w.Close()
+
+	seg := segment.Segment{Index: 0, Start: 0, End: int64(len(data)) - 1}
+	if err := downloadSegment(context.Background(), srv.Client(), srv.URL+"/file.bin", seg, w, nil); err != nil {
+		t.Fatalf("downloadSegment with nil prog: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if !bytes.Equal(got, data) {
+		t.Error("nil-progress download produced wrong bytes")
 	}
 }

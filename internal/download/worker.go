@@ -17,8 +17,8 @@ const bufSize = 256 * 1024
 
 // downloadSegment fetches seg with a ranged GET and writes the body at its
 // absolute offset in w, reporting progress as it goes.
-func downloadSegment(ctx context.Context, client *http.Client, url string, seg segment.Segment, w *writer.Writer, prog ProgressFunc) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func downloadSegment(ctx context.Context, client *http.Client, rawURL string, seg segment.Segment, w *writer.Writer, prog ProgressFunc) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
