@@ -26,6 +26,21 @@ func New(path string, size int64) (*Writer, error) {
 	return &Writer{f: f}, nil
 }
 
+// Open opens an EXISTING file for resuming a download without truncating its
+// contents, ensuring it is pre-allocated to size bytes. Use New for a fresh
+// download.
+func Open(path string, size int64) (*Writer, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o644) // no O_CREATE, no O_TRUNC
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &Writer{f: f}, nil
+}
+
 // WriteAt writes p at off. Safe for concurrent use on non-overlapping regions.
 func (w *Writer) WriteAt(p []byte, off int64) (int, error) {
 	return w.f.WriteAt(p, off)

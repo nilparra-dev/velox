@@ -120,7 +120,7 @@ func runSingle(ctx context.Context, client *http.Client, rawURL string, size int
 	}
 	// off starts at 0: the single-stream path fills a file already
 	// pre-allocated to the full size, so byte i of the body is file byte i.
-	got, err := copyAt(resp.Body, w, 0, prog)
+	got, err := copyAt(resp.Body, w, 0, prog, nil)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func streamUnknown(ctx context.Context, client *http.Client, rawURL, part string
 		return err
 	}
 	defer f.Close()
-	_, err = copyAt(resp.Body, f, 0, prog)
+	_, err = copyAt(resp.Body, f, 0, prog, nil)
 	return err
 }
 
