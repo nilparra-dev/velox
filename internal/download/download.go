@@ -3,7 +3,6 @@ package download
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 
@@ -71,7 +70,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		if ranged {
 			err = runRanged(ctx, client, info.URL, info.Size, conns, w, opts.Progress)
 		} else {
-			err = runSingle(ctx, client, info.URL, w, opts.Progress)
+			err = runSingle(ctx, client, info.URL, info.Size, w, opts.Progress)
 		}
 		if cerr := w.Close(); err == nil {
 			err = cerr
@@ -106,7 +105,7 @@ func runRanged(ctx context.Context, client *http.Client, rawURL string, size int
 	return g.Wait()
 }
 
-func runSingle(ctx context.Context, client *http.Client, rawURL string, w *writer.Writer, prog ProgressFunc) error {
+func runSingle(ctx context.Context, client *http.Client, rawURL string, size int64, w *writer.Writer, prog ProgressFunc) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -119,31 +118,14 @@ func runSingle(ctx context.Context, client *http.Client, rawURL string, w *write
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("single: expected 200, got %s", resp.Status)
 	}
-	return copyToWriterAt(resp.Body, w, prog)
-}
-
-func copyToWriterAt(r io.Reader, w *writer.Writer, prog ProgressFunc) error {
 	// off starts at 0: the single-stream path fills a file already
 	// pre-allocated to the full size, so byte i of the body is file byte i.
-	buf := make([]byte, bufSize)
-	var off int64
-	for {
-		n, readErr := r.Read(buf)
-		if n > 0 {
-			if _, werr := w.WriteAt(buf[:n], off); werr != nil {
-				return werr
-			}
-			off += int64(n)
-			if prog != nil {
-				prog(int64(n))
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
+	got, err := copyAt(resp.Body, w, 0, prog)
+	if err != nil {
+		return err
+	}
+	if got != size {
+		return fmt.Errorf("single: wrote %d bytes, want %d", got, size)
 	}
 	return nil
 }
@@ -166,25 +148,8 @@ func streamUnknown(ctx context.Context, client *http.Client, rawURL, part string
 		return err
 	}
 	defer f.Close()
-	buf := make([]byte, bufSize)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			if prog != nil {
-				prog(int64(n))
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-	return nil
+	_, err = copyAt(resp.Body, f, 0, prog)
+	return err
 }
 
 func verifySize(path string, want int64) error {

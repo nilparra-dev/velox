@@ -150,3 +150,40 @@ func TestRunSingleStreamFallback(t *testing.T) {
 		t.Errorf(".part file was not removed after finalize")
 	}
 }
+
+func TestRunSingleStreamTruncatedFails(t *testing.T) {
+	full := makeData(64 * 1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Advertise the full length but send only half, then return (truncated).
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full[:len(full)/2])
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "trunc.bin")
+	if _, err := Run(context.Background(), Options{
+		URL: srv.URL + "/blob", Output: out, Connections: 4, Client: srv.Client(),
+	}); err == nil {
+		t.Fatal("expected error for truncated single-stream download, got nil")
+	}
+}
+
+func TestRunRejectsWrongContentRange(t *testing.T) {
+	data := makeData(4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always claim the range starts at 0, no matter what was requested.
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Range", "bytes 0-4095/4096")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[:1])
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "wrongrange.bin")
+	if _, err := Run(context.Background(), Options{
+		URL: srv.URL + "/file.bin", Output: out, Connections: 2, Client: srv.Client(),
+	}); err == nil {
+		t.Fatal("expected error when server returns the wrong Content-Range, got nil")
+	}
+}

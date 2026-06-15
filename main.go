@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -45,8 +46,12 @@ func main() {
 		Transport: &http.Transport{
 			MaxConnsPerHost:     *conns + 2,
 			MaxIdleConnsPerHost: *conns + 2,
-			ForceAttemptHTTP2:   false, // multiple HTTP/1.1 conns bypass per-flow throttling
-			IdleConnTimeout:     90 * time.Second,
+			// Disable HTTP/2: an empty (non-nil) TLSNextProto removes the "h2"
+			// ALPN upgrade, so each of the N range requests uses its own TCP
+			// connection. (ForceAttemptHTTP2:false alone does NOT disable h2
+			// when no custom dialer/TLSConfig is set.)
+			TLSNextProto:    make(map[string]func(string, *tls.Conn) http.RoundTripper),
+			IdleConnTimeout: 90 * time.Second,
 		},
 	}
 
