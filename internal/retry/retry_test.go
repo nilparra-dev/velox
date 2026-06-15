@@ -24,6 +24,9 @@ func TestBackoffBoundsAndJitter(t *testing.T) {
 	if got := p.Backoff(0, 2.0); got != 500*time.Millisecond {
 		t.Errorf("jitter clamps >1 to 1: got %v", got)
 	}
+	if got := p.Backoff(1, -0.5); got != 0 {
+		t.Errorf("negative jitter should clamp to 0, got %v", got)
+	}
 }
 
 func TestClassify(t *testing.T) {
@@ -37,6 +40,8 @@ func TestClassify(t *testing.T) {
 		{nil, http.StatusServiceUnavailable, Retryable},
 		{nil, http.StatusInternalServerError, Retryable},
 		{nil, http.StatusRequestTimeout, Retryable},
+		{nil, http.StatusBadGateway, Retryable},     // 502
+		{nil, http.StatusGatewayTimeout, Retryable}, // 504
 		{nil, http.StatusNotFound, Fatal},
 		{nil, http.StatusForbidden, Fatal},
 		{nil, http.StatusRequestedRangeNotSatisfiable, Fatal},
@@ -70,5 +75,17 @@ func TestRetryAfter(t *testing.T) {
 	h.Set("Retry-After", "garbage")
 	if _, ok := RetryAfter(h, now); ok {
 		t.Error("garbage header should return ok=false")
+	}
+	// Negative delta-seconds clamps to 0.
+	h = http.Header{}
+	h.Set("Retry-After", "-3")
+	if d, ok := RetryAfter(h, now); !ok || d != 0 {
+		t.Errorf("negative seconds: got %v ok=%v, want 0 true", d, ok)
+	}
+	// A past HTTP-date clamps to 0.
+	h = http.Header{}
+	h.Set("Retry-After", now.Add(-5*time.Second).UTC().Format(http.TimeFormat))
+	if d, ok := RetryAfter(h, now); !ok || d != 0 {
+		t.Errorf("past http-date: got %v ok=%v, want 0 true", d, ok)
 	}
 }
