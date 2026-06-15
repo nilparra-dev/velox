@@ -20,14 +20,21 @@ func Plan(size, chunkSize int64) []Chunk {
 	if chunkSize < 1 {
 		chunkSize = size
 	}
-	var chunks []Chunk
+	n := size / chunkSize
+	if size%chunkSize != 0 {
+		n++
+	}
+	chunks := make([]Chunk, 0, n)
 	var start int64
-	for idx := 0; start < size; idx++ {
-		end := start + chunkSize - 1
-		if end >= size {
+	for start < size {
+		// Overflow-safe: never compute start+chunkSize-1 when it could exceed size.
+		var end int64
+		if chunkSize-1 >= size-start {
 			end = size - 1
+		} else {
+			end = start + chunkSize - 1
 		}
-		chunks = append(chunks, Chunk{Index: idx, Start: start, End: end})
+		chunks = append(chunks, Chunk{Index: len(chunks), Start: start, End: end})
 		start = end + 1
 	}
 	return chunks

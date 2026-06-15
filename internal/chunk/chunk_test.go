@@ -7,6 +7,9 @@ func TestPlanFixedSizeWithShortLast(t *testing.T) {
 	if len(chunks) != 4 {
 		t.Fatalf("got %d chunks, want 4", len(chunks))
 	}
+	if chunks[0].Start != 0 {
+		t.Errorf("first chunk Start = %d, want 0", chunks[0].Start)
+	}
 	want := []int64{30, 30, 30, 10}
 	var total int64
 	for i, c := range chunks {
@@ -38,6 +41,9 @@ func TestPlanGuards(t *testing.T) {
 	}
 	if got := Plan(50, 0); len(got) != 1 || got[0].Length() != 50 {
 		t.Errorf("chunkSize<1: want 1 chunk of 50, got %v", got)
+	}
+	if got := Plan(50, -1); len(got) != 1 || got[0].Length() != 50 {
+		t.Errorf("negative chunkSize: want 1 chunk of 50, got %v", got)
 	}
 	if got := Plan(0, 10); got != nil {
 		t.Errorf("size 0: want nil, got %v", got)
