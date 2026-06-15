@@ -53,6 +53,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	opts.Client = client // ensure runChunked/workers use the normalized client
 	if opts.Connections < 1 {
 		opts.Connections = 1
 	}
@@ -98,7 +99,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	workers := opts.Connections
-	if len(p.pending) > 0 && workers > len(p.pending) {
+	if workers > len(p.pending) {
 		workers = len(p.pending)
 	}
 	if workers < 1 {

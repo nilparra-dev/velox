@@ -125,7 +125,7 @@ func TestRunRejectsWrongContentRange(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "wrongrange.bin")
 	if _, err := Run(context.Background(), Options{
-		URL: srv.URL + "/file.bin", Output: out, Connections: 2, ChunkSize: 2048, Client: srv.Client(),
+		URL: srv.URL + "/file.bin", Output: out, Connections: 2, ChunkSize: 2048, Retries: 2, Client: srv.Client(),
 	}); err == nil {
 		t.Fatal("expected error when server returns the wrong Content-Range, got nil")
 	}
@@ -213,5 +213,23 @@ func TestRunRestartIgnoresStaleManifest(t *testing.T) {
 	final, _ := os.ReadFile(out)
 	if !bytes.Equal(final, data) {
 		t.Error("restarted file is not byte-exact")
+	}
+}
+
+func TestRunNilClientUsesDefault(t *testing.T) {
+	data := makeData(20 * 1024)
+	srv := rangedServer(data)
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "r.bin")
+	// Client deliberately omitted (nil) — Run must fall back to http.DefaultClient.
+	if _, err := Run(context.Background(), Options{
+		URL: srv.URL + "/file.bin", Output: out, Connections: 2, ChunkSize: 8 * 1024,
+	}); err != nil {
+		t.Fatalf("Run with nil client: %v", err)
+	}
+	got, _ := os.ReadFile(out)
+	if !bytes.Equal(got, data) {
+		t.Error("nil-client download bytes mismatch")
 	}
 }
