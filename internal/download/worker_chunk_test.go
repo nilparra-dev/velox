@@ -85,3 +85,47 @@ func TestDownloadChunkRejectsRemoteChange(t *testing.T) {
 		t.Fatal("expected errRemoteChanged, got nil")
 	}
 }
+
+func TestDownloadChunkRecoversFromStall(t *testing.T) {
+	data := makeData(8192)
+	var seen int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen++
+		n := seen
+		mu.Unlock()
+		if n == 1 {
+			// First attempt: send a little, flush, then stall until the client
+			// cancels (the stall watchdog cancels the attempt context).
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Range", "bytes 0-8191/8192")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(data[:16])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done() // unblocks when the stalled attempt is cancelled
+			return
+		}
+		http.ServeContent(w, r, "file.bin", time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "out.bin")
+	w, err := writer.New(path, int64(len(data)))
+	if err != nil {
+		t.Fatalf("writer.New: %v", err)
+	}
+	defer w.Close()
+
+	c := chunk.Chunk{Index: 0, Start: 0, End: int64(len(data)) - 1}
+	if err := downloadChunk(context.Background(), srv.Client(), srv.URL+"/file.bin", "", c, w, fastPolicy(), 100*time.Millisecond); err != nil {
+		t.Fatalf("downloadChunk after stall: %v", err)
+	}
+	w.Close()
+	got, _ := os.ReadFile(path)
+	if !bytes.Equal(got, data) {
+		t.Error("bytes mismatch after stall recovery")
+	}
+}

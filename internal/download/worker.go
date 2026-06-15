@@ -173,6 +173,8 @@ func attemptChunk(parent context.Context, client *http.Client, rawURL, ifRange s
 		return 0, errRemoteChanged
 	default:
 		ra, _ := retry.RetryAfter(resp.Header, time.Now())
+		// Drain a bounded amount so the connection can be reused on retry.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return ra, &httpError{status: resp.StatusCode}
 	}
 
