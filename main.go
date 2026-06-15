@@ -50,9 +50,15 @@ func main() {
 		},
 	}
 
-	p := mpb.New()
+	p := mpb.NewWithContext(ctx)
+	// bar is assigned once in onInfo, which download.Run calls before it
+	// launches the worker goroutines (goroutine creation is a happens-before
+	// edge, so the write is visible to them). bar.IncrInt64 is itself safe for
+	// concurrent use, so the workers can report progress in parallel.
 	var bar *mpb.Bar
 	onInfo := func(size int64, ranged bool) {
+		// Unknown size (server gave no Content-Length): total stays 0, so the bar
+		// shows transferred bytes/speed without a percentage. Acceptable for the MVP.
 		total := size
 		if total < 0 {
 			total = 0
