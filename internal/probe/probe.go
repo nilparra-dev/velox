@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -58,6 +59,10 @@ func Probe(ctx context.Context, client *http.Client, rawURL string) (*RemoteInfo
 	default:
 		return nil, fmt.Errorf("probe: unexpected status %s", resp.Status)
 	}
+
+	// Drain a bounded amount so the connection can be reused by the client.
+	// We only needed headers; the body is at most one byte on a 206.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 16<<10))
 
 	info.Filename = filenameFromURL(info.URL)
 	return info, nil

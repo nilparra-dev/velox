@@ -45,7 +45,7 @@ func TestProbeNoRangeServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(http.StatusOK) // ignores Range entirely
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 	defer srv.Close()
 
@@ -58,5 +58,46 @@ func TestProbeNoRangeServer(t *testing.T) {
 	}
 	if info.Size != int64(len(data)) {
 		t.Errorf("Size = %d, want %d", info.Size, len(data))
+	}
+	if info.Filename != "blob" {
+		t.Errorf("Filename = %q, want blob", info.Filename)
+	}
+}
+
+func TestProbeErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	info, err := Probe(context.Background(), srv.Client(), srv.URL+"/x")
+	if err == nil {
+		t.Fatal("expected error for 403, got nil")
+	}
+	if info != nil {
+		t.Errorf("expected nil RemoteInfo on error, got %+v", info)
+	}
+}
+
+func TestProbeFollowsRedirectToFinalURL(t *testing.T) {
+	data := makeData(1024)
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "real.bin", time.Time{}, bytes.NewReader(data))
+	}))
+	defer final.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/real.bin", http.StatusFound)
+	}))
+	defer redir.Close()
+
+	info, err := Probe(context.Background(), redir.Client(), redir.URL+"/start")
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if info.URL != final.URL+"/real.bin" {
+		t.Errorf("final URL = %q, want %q", info.URL, final.URL+"/real.bin")
+	}
+	if info.Filename != "real.bin" {
+		t.Errorf("Filename = %q, want real.bin", info.Filename)
 	}
 }
