@@ -23,7 +23,7 @@ type plan struct {
 func prepare(opts Options, info *probe.RemoteInfo, part, mpath string) *plan {
 	chunkSize := opts.ChunkSize
 	if chunkSize < 1 {
-		chunkSize = defaultChunkSize
+		chunkSize = DefaultChunkSize
 	}
 
 	if opts.Restart {

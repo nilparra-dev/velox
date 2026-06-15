@@ -20,7 +20,7 @@ import (
 func main() {
 	conns := flag.Int("n", 8, "number of parallel connections (1-16)")
 	out := flag.String("o", "", "output file path (default: derived from URL)")
-	chunkSize := flag.Int64("chunk-size", 16<<20, "bytes per chunk")
+	chunkSize := flag.Int64("chunk-size", download.DefaultChunkSize, "bytes per chunk")
 	retries := flag.Int("retries", 6, "max attempts per chunk")
 	restart := flag.Bool("restart", false, "ignore any existing .part/.dm and start fresh")
 	flag.Usage = func() {

@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	defaultChunkSize      = 16 << 20 // 16 MiB
+	// DefaultChunkSize is the chunk size used when none is specified.
+	DefaultChunkSize      = 16 << 20 // 16 MiB
 	defaultStall          = 30 * time.Second
 	manifestFlushInterval = time.Second
 )
@@ -107,6 +108,13 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	runErr := runChunked(ctx, opts, info, w, p, pol, workers)
+	// Durability model: chunk bytes are written via WriteAt but only fsync'd
+	// once here, after all chunks complete. The manifest marks a chunk done as
+	// soon as its body is fully written (not fsync'd), so a hard crash could
+	// lose page-cached bytes for a chunk the manifest claims is complete; that
+	// chunk would not be re-fetched on resume. This matches aria2/wget behavior
+	// and trades a tiny crash-corruption window for far less I/O. verifySize
+	// still catches a truncated .part.
 	if runErr == nil {
 		runErr = w.Sync()
 	}
