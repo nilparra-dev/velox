@@ -20,8 +20,11 @@ import (
 func main() {
 	conns := flag.Int("n", 8, "number of parallel connections (1-16)")
 	out := flag.String("o", "", "output file path (default: derived from URL)")
+	chunkSize := flag.Int64("chunk-size", 16<<20, "bytes per chunk")
+	retries := flag.Int("retries", 6, "max attempts per chunk")
+	restart := flag.Bool("restart", false, "ignore any existing .part/.dm and start fresh")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: velox [-n N] [-o FILE] URL\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: velox [-n N] [-o FILE] [--chunk-size BYTES] [--retries N] [--restart] URL\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -46,24 +49,16 @@ func main() {
 		Transport: &http.Transport{
 			MaxConnsPerHost:     *conns + 2,
 			MaxIdleConnsPerHost: *conns + 2,
-			// Disable HTTP/2: an empty (non-nil) TLSNextProto removes the "h2"
-			// ALPN upgrade, so each of the N range requests uses its own TCP
-			// connection. (ForceAttemptHTTP2:false alone does NOT disable h2
-			// when no custom dialer/TLSConfig is set.)
-			TLSNextProto:    make(map[string]func(string, *tls.Conn) http.RoundTripper),
-			IdleConnTimeout: 90 * time.Second,
+			// Disable HTTP/2 so each range request uses its own TCP connection.
+			TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+			ResponseHeaderTimeout: 30 * time.Second, // bounds time-to-headers, not the body
+			IdleConnTimeout:       90 * time.Second,
 		},
 	}
 
 	p := mpb.NewWithContext(ctx)
-	// bar is assigned once in onInfo, which download.Run calls before it
-	// launches the worker goroutines (goroutine creation is a happens-before
-	// edge, so the write is visible to them). bar.IncrInt64 is itself safe for
-	// concurrent use, so the workers can report progress in parallel.
 	var bar *mpb.Bar
 	onInfo := func(size int64, ranged bool, resumed int64) {
-		// Unknown size (server gave no Content-Length): total stays 0, so the bar
-		// shows transferred bytes/speed without a percentage. Acceptable for the MVP.
 		total := size
 		if total < 0 {
 			total = 0
@@ -77,6 +72,9 @@ func main() {
 				decor.Percentage(decor.WCSyncSpace),
 			),
 		)
+		if resumed > 0 {
+			bar.SetCurrent(resumed) // reflect bytes already on disk from a prior run
+		}
 	}
 	prog := func(n int64) {
 		if bar != nil {
@@ -88,6 +86,9 @@ func main() {
 		URL:         url,
 		Output:      *out,
 		Connections: *conns,
+		ChunkSize:   *chunkSize,
+		Retries:     *retries,
+		Restart:     *restart,
 		Client:      client,
 		Progress:    prog,
 		OnInfo:      onInfo,
@@ -95,9 +96,13 @@ func main() {
 	p.Wait()
 
 	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "velox: interrupted — re-run the same command to resume")
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "velox: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Saved %s (%d bytes, %d connections, ranged=%v)\n",
-		res.Output, res.Size, res.Connections, res.Ranged)
+	fmt.Printf("Saved %s (%d bytes, %d connections, ranged=%v, resumed=%v)\n",
+		res.Output, res.Size, res.Connections, res.Ranged, res.Resumed)
 }
