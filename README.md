@@ -8,9 +8,11 @@ HTTP range connections to a single direct link, writes every chunk straight to i
 offset on disk (no merge step), resumes interrupted transfers, and verifies
 integrity when it finishes.
 
-> **Status:** MVP working. Parallel ranged downloads, single-stream fallback, and
-> size verification are implemented and tested. Resume, retries, and checksums are
-> next (see the roadmap).
+> **Status:** resumable & hardened. Work-stealing chunk downloads, cross-run resume
+> (interrupt and re-run the same command), per-chunk retries with backoff and
+> `Retry-After`, stall detection, `If-Range` remote-change safety, and a durable
+> `fsync`+atomic finalize are implemented and tested. Checksum verification against
+> an external hash is next (see the roadmap).
 
 ## Install
 
@@ -28,15 +30,23 @@ go build -o velox .
 ## Usage
 
 ```sh
-velox [-n N] [-o FILE] URL
+velox [-n N] [-o FILE] [--chunk-size BYTES] [--retries N] [--restart] URL
 ```
 
 - `-n N` — number of parallel connections (default 8, capped at 16).
 - `-o FILE` — output path (default: derived from the URL).
+- `--chunk-size BYTES` — bytes per chunk (default 16 MiB). Smaller chunks give finer
+  resume granularity and more parallelism on smaller files.
+- `--retries N` — max attempts per chunk (default 6).
+- `--restart` — ignore any existing `.part`/`.dm` and start fresh.
 
 ```sh
 velox -n 8 -o ubuntu.iso https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso
 ```
+
+If a download is interrupted (Ctrl-C, crash, or network loss), just re-run the same
+command — `velox` resumes from a sidecar manifest (`<output>.dm`) and re-fetches only
+the missing chunks.
 
 ## Why
 
@@ -56,7 +66,7 @@ What software can and cannot do here:
 
 - Parallel multi-connection downloads via HTTP `Range` requests.
 - Single pre-allocated output file with concurrent `WriteAt` (no temp-part merge).
-- Resume interrupted downloads via a sidecar manifest (per-segment progress).
+- Resume interrupted downloads via a sidecar manifest (completed-chunk tracking).
 - Automatic, graceful fallback to a single stream when the server has no range support.
 - Integrity verification: size always; SHA-256/MD5 when a checksum is available.
 - Cross-platform single binary (Windows, Linux, macOS).
@@ -66,8 +76,9 @@ What software can and cannot do here:
 - **Phase 0** — Spike: single-stream download with progress bar. ✅
 - **Phase 1 (MVP)** — Parallel range download, pre-allocated `WriteAt`, size check,
   single-stream fallback. ✅
-- **Phase 2** — Resume manifest, retries with backoff, ETag validation, atomic finalize.
-- **Phase 3** — Work-stealing chunks, adaptive connection count, rate limiting, auth headers.
+- **Phase 2** — Work-stealing chunks, resume manifest, retries with backoff,
+  `If-Range` validation, stall detection, durable finalize. ✅
+- **Phase 3** — Adaptive connection count, rate limiting, auth headers, checksum verify.
 - **Phase 4** — Multi-bar UI, config file, multi-URL queue, mirrors, packaged releases.
 
 ## License
