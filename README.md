@@ -8,8 +8,35 @@ HTTP range connections to a single direct link, writes every chunk straight to i
 offset on disk (no merge step), resumes interrupted transfers, and verifies
 integrity when it finishes.
 
-> **Status:** early development. The design is being finalized; the CLI is not yet
-> functional. See the roadmap below.
+> **Status:** MVP working. Parallel ranged downloads, single-stream fallback, and
+> size verification are implemented and tested. Resume, retries, and checksums are
+> next (see the roadmap).
+
+## Install
+
+```sh
+go install github.com/nilparra-dev/velox@latest
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/nilparra-dev/velox && cd velox
+go build -o velox .
+```
+
+## Usage
+
+```sh
+velox [-n N] [-o FILE] URL
+```
+
+- `-n N` — number of parallel connections (default 8, capped at 16).
+- `-o FILE` — output path (default: derived from the URL).
+
+```sh
+velox -n 8 -o ubuntu.iso https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso
+```
 
 ## Why
 
@@ -36,9 +63,9 @@ What software can and cannot do here:
 
 ## Roadmap
 
-- **Phase 0** — Spike: single-stream download with progress bar.
+- **Phase 0** — Spike: single-stream download with progress bar. ✅
 - **Phase 1 (MVP)** — Parallel range download, pre-allocated `WriteAt`, size check,
-  single-stream fallback.
+  single-stream fallback. ✅
 - **Phase 2** — Resume manifest, retries with backoff, ETag validation, atomic finalize.
 - **Phase 3** — Work-stealing chunks, adaptive connection count, rate limiting, auth headers.
 - **Phase 4** — Multi-bar UI, config file, multi-URL queue, mirrors, packaged releases.
