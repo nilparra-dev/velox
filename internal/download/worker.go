@@ -12,7 +12,6 @@ import (
 
 	"github.com/nilparra-dev/velox/internal/chunk"
 	"github.com/nilparra-dev/velox/internal/retry"
-	"github.com/nilparra-dev/velox/internal/segment"
 	"github.com/nilparra-dev/velox/internal/writer"
 )
 
@@ -49,45 +48,6 @@ func copyAt(r io.Reader, w io.WriterAt, off int64, prog ProgressFunc, tick func(
 		}
 	}
 	return off - start, nil
-}
-
-// downloadSegment fetches seg with a ranged GET and writes the body at its
-// absolute offset in w, reporting progress as it goes.
-func downloadSegment(ctx context.Context, client *http.Client, rawURL string, seg segment.Segment, w *writer.Writer, prog ProgressFunc) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.Start, seg.End))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("segment %d: expected 206, got %s", seg.Index, resp.Status)
-	}
-
-	// Guard against a server that returns 206 with a right-sized body but the
-	// WRONG byte range (e.g. a broken CDN cache): the response must claim it
-	// starts at the offset we requested.
-	if cr := resp.Header.Get("Content-Range"); cr != "" {
-		want := fmt.Sprintf("bytes %d-", seg.Start)
-		if !strings.HasPrefix(cr, want) {
-			return fmt.Errorf("segment %d: unexpected Content-Range %q (want prefix %q)", seg.Index, cr, want)
-		}
-	}
-
-	got, err := copyAt(resp.Body, w, seg.Start, prog, nil)
-	if err != nil {
-		return err
-	}
-	if got != seg.Length() {
-		return fmt.Errorf("segment %d: wrote %d bytes, want %d", seg.Index, got, seg.Length())
-	}
-	return nil
 }
 
 // errRemoteChanged signals the server answered an If-Range request with 200,

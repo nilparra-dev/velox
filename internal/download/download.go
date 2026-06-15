@@ -1,38 +1,53 @@
+// internal/download/download.go
 package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/nilparra-dev/velox/internal/probe"
-	"github.com/nilparra-dev/velox/internal/segment"
+	"github.com/nilparra-dev/velox/internal/retry"
 	"github.com/nilparra-dev/velox/internal/writer"
+)
+
+const (
+	defaultChunkSize      = 16 << 20 // 16 MiB
+	defaultStall          = 30 * time.Second
+	manifestFlushInterval = time.Second
 )
 
 // Options configures a single download.
 type Options struct {
-	URL         string
-	Output      string                        // final path; empty -> derived from URL
-	Connections int                           // desired parallel connections (>=1)
-	Client      *http.Client                  // nil -> http.DefaultClient
-	Progress    ProgressFunc                  // optional, called per chunk written
-	OnInfo      func(size int64, ranged bool) // optional, called once after probe
+	URL          string
+	Output       string                                       // final path; empty -> derived from URL
+	Connections  int                                          // worker count (>=1)
+	ChunkSize    int64                                        // bytes per chunk (<=0 -> default)
+	Retries      int                                          // max attempts per chunk (<=0 -> default)
+	Restart      bool                                         // ignore/delete any existing .part/.dm and start fresh
+	StallTimeout time.Duration                                // no-progress timeout per attempt (<=0 -> default)
+	Client       *http.Client                                 // nil -> http.DefaultClient
+	Progress     ProgressFunc                                 // optional, called per completed chunk (or per read on single-stream)
+	OnInfo       func(size int64, ranged bool, resumed int64) // optional, called once after probe
 }
 
 // Result reports the outcome of a download.
 type Result struct {
 	Output      string
-	Size        int64 // total bytes; -1 if the server did not report a size
+	Size        int64
 	Connections int
 	Ranged      bool
+	Resumed     bool
 }
 
-// Run probes the URL, downloads it (ranged-parallel or single-stream), verifies
-// the size, and atomically renames the .part file to the final output.
+// Run downloads opts.URL: chunked + resumable when the server supports ranges,
+// or a single stream otherwise. It verifies size, fsyncs, atomically renames
+// the .part to the final output, and removes the manifest on success.
 func Run(ctx context.Context, opts Options) (*Result, error) {
 	client := opts.Client
 	if client == nil {
@@ -52,60 +67,160 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		out = info.Filename
 	}
 	part := out + ".part"
+	mpath := out + ".dm"
 
-	ranged := info.AcceptRanges && info.Size > 0 && opts.Connections > 1
-	conns := 1
-	if ranged {
-		conns = opts.Connections
+	ranged := info.AcceptRanges && info.Size > 0
+	if !ranged {
+		if opts.OnInfo != nil {
+			opts.OnInfo(info.Size, false, 0)
+		}
+		return runSingleStream(ctx, client, info, out, part, opts.Progress)
 	}
+
+	pol := retry.Default()
+	if opts.Retries > 0 {
+		pol.MaxAttempts = opts.Retries
+	}
+
+	p := prepare(opts, info, part, mpath)
 	if opts.OnInfo != nil {
-		opts.OnInfo(info.Size, ranged)
+		opts.OnInfo(info.Size, true, p.resumed)
 	}
 
+	var w *writer.Writer
+	if p.fresh {
+		w, err = writer.New(part, info.Size)
+	} else {
+		w, err = writer.Open(part, info.Size)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	workers := opts.Connections
+	if len(p.pending) > 0 && workers > len(p.pending) {
+		workers = len(p.pending)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	runErr := runChunked(ctx, opts, info, w, p, pol, workers)
+	if runErr == nil {
+		runErr = w.Sync()
+	}
+	if cerr := w.Close(); runErr == nil {
+		runErr = cerr
+	}
+	if runErr != nil {
+		if errors.Is(runErr, errRemoteChanged) {
+			os.Remove(part)
+			os.Remove(mpath)
+		}
+		// Otherwise keep .part + .dm so a re-run resumes.
+		return nil, runErr
+	}
+
+	if err := verifySize(part, info.Size); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(part, out); err != nil {
+		return nil, err
+	}
+	os.Remove(mpath)
+
+	return &Result{Output: out, Size: info.Size, Connections: workers, Ranged: true, Resumed: !p.fresh}, nil
+}
+
+// runChunked runs the worker pool over the pending chunks, flushing the
+// manifest periodically and once more at the end.
+func runChunked(ctx context.Context, opts Options, info *probe.RemoteInfo, w *writer.Writer, p *plan, pol retry.Policy, workers int) error {
+	ifRange := info.ETag
+	if ifRange == "" {
+		ifRange = info.LastModified
+	}
+	stall := opts.StallTimeout
+	if stall <= 0 {
+		stall = defaultStall
+	}
+
+	queue := make(chan int, len(p.pending))
+	for _, idx := range p.pending {
+		queue <- idx
+	}
+	close(queue)
+
+	flushDone := make(chan struct{})
+	flushStopped := make(chan struct{})
+	go func() {
+		defer close(flushStopped)
+		t := time.NewTicker(manifestFlushInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-flushDone:
+				return
+			case <-t.C:
+				_ = p.manifest.Save()
+			}
+		}
+	}()
+
+	g, gctx := errgroup.WithContext(ctx)
+	for i := 0; i < workers; i++ {
+		g.Go(func() error {
+			for idx := range queue {
+				if gctx.Err() != nil {
+					return gctx.Err()
+				}
+				c := p.chunks[idx]
+				if err := downloadChunk(gctx, opts.Client, info.URL, ifRange, c, w, pol, stall); err != nil {
+					return err
+				}
+				p.manifest.MarkDone(idx)
+				if opts.Progress != nil {
+					opts.Progress(c.Length())
+				}
+			}
+			return nil
+		})
+	}
+	err := g.Wait()
+	close(flushDone)
+	<-flushStopped        // ensure the flusher has stopped before the final Save
+	_ = p.manifest.Save() // persist final progress
+	return err
+}
+
+// runSingleStream handles servers without range support: one GET, no resume.
+func runSingleStream(ctx context.Context, client *http.Client, info *probe.RemoteInfo, out, part string, prog ProgressFunc) (*Result, error) {
 	if info.Size > 0 {
-		w, werr := writer.New(part, info.Size)
-		if werr != nil {
-			return nil, werr
+		w, err := writer.New(part, info.Size)
+		if err != nil {
+			return nil, err
 		}
-		if ranged {
-			err = runRanged(ctx, client, info.URL, info.Size, conns, w, opts.Progress)
-		} else {
-			err = runSingle(ctx, client, info.URL, info.Size, w, opts.Progress)
-		}
+		err = streamFull(ctx, client, info.URL, w, prog, info.Size)
 		if cerr := w.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
 			return nil, err
 		}
-		if verr := verifySize(part, info.Size); verr != nil {
-			return nil, verr
+		if err := verifySize(part, info.Size); err != nil {
+			return nil, err
 		}
 	} else {
-		if serr := streamUnknown(ctx, client, info.URL, part, opts.Progress); serr != nil {
-			return nil, serr
+		if err := streamUnknown(ctx, client, info.URL, part, prog); err != nil {
+			return nil, err
 		}
 	}
-
-	if rerr := os.Rename(part, out); rerr != nil {
-		return nil, rerr
+	if err := os.Rename(part, out); err != nil {
+		return nil, err
 	}
-	return &Result{Output: out, Size: info.Size, Connections: conns, Ranged: ranged}, nil
+	return &Result{Output: out, Size: info.Size, Connections: 1, Ranged: false, Resumed: false}, nil
 }
 
-func runRanged(ctx context.Context, client *http.Client, rawURL string, size int64, conns int, w *writer.Writer, prog ProgressFunc) error {
-	segs := segment.Split(size, conns)
-	g, gctx := errgroup.WithContext(ctx)
-	for _, seg := range segs {
-		seg := seg
-		g.Go(func() error {
-			return downloadSegment(gctx, client, rawURL, seg, w, prog)
-		})
-	}
-	return g.Wait()
-}
-
-func runSingle(ctx context.Context, client *http.Client, rawURL string, size int64, w *writer.Writer, prog ProgressFunc) error {
+func streamFull(ctx context.Context, client *http.Client, rawURL string, w *writer.Writer, prog ProgressFunc, size int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -118,8 +233,6 @@ func runSingle(ctx context.Context, client *http.Client, rawURL string, size int
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("single: expected 200, got %s", resp.Status)
 	}
-	// off starts at 0: the single-stream path fills a file already
-	// pre-allocated to the full size, so byte i of the body is file byte i.
 	got, err := copyAt(resp.Body, w, 0, prog, nil)
 	if err != nil {
 		return err

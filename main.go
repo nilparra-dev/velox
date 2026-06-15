@@ -61,7 +61,7 @@ func main() {
 	// edge, so the write is visible to them). bar.IncrInt64 is itself safe for
 	// concurrent use, so the workers can report progress in parallel.
 	var bar *mpb.Bar
-	onInfo := func(size int64, ranged bool) {
+	onInfo := func(size int64, ranged bool, resumed int64) {
 		// Unknown size (server gave no Content-Length): total stays 0, so the bar
 		// shows transferred bytes/speed without a percentage. Acceptable for the MVP.
 		total := size

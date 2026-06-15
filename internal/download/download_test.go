@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nilparra-dev/velox/internal/segment"
+	"github.com/nilparra-dev/velox/internal/manifest"
+	"github.com/nilparra-dev/velox/internal/probe"
 	"github.com/nilparra-dev/velox/internal/writer"
 )
 
@@ -28,65 +29,6 @@ func rangedServer(data []byte) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "file.bin", time.Time{}, bytes.NewReader(data))
 	}))
-}
-
-func TestDownloadSegmentWritesAtOffset(t *testing.T) {
-	data := makeData(8192)
-	srv := rangedServer(data)
-	defer srv.Close()
-
-	path := filepath.Join(t.TempDir(), "out.bin")
-	w, err := writer.New(path, int64(len(data)))
-	if err != nil {
-		t.Fatalf("writer.New: %v", err)
-	}
-
-	seg := segment.Segment{Index: 0, Start: 100, End: 199} // 100 bytes
-	var progressed int64
-	prog := func(n int64) { atomic.AddInt64(&progressed, n) }
-
-	if err := downloadSegment(context.Background(), srv.Client(), srv.URL+"/file.bin", seg, w, prog); err != nil {
-		t.Fatalf("downloadSegment: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("w.Close: %v", err)
-	}
-
-	if progressed != 100 {
-		t.Errorf("progress = %d, want 100", progressed)
-	}
-	got, _ := os.ReadFile(path)
-	if !bytes.Equal(got[100:200], data[100:200]) {
-		t.Errorf("bytes [100:200] mismatch")
-	}
-	if !bytes.Equal(got[:100], make([]byte, 100)) {
-		t.Error("bytes before the segment are non-zero (wrote at wrong offset)")
-	}
-	if !bytes.Equal(got[200:], make([]byte, len(got)-200)) {
-		t.Error("bytes after the segment are non-zero (wrote past the range)")
-	}
-}
-
-func TestDownloadSegmentNilProgress(t *testing.T) {
-	data := makeData(1024)
-	srv := rangedServer(data)
-	defer srv.Close()
-
-	path := filepath.Join(t.TempDir(), "out.bin")
-	w, err := writer.New(path, int64(len(data)))
-	if err != nil {
-		t.Fatalf("writer.New: %v", err)
-	}
-	defer w.Close()
-
-	seg := segment.Segment{Index: 0, Start: 0, End: int64(len(data)) - 1}
-	if err := downloadSegment(context.Background(), srv.Client(), srv.URL+"/file.bin", seg, w, nil); err != nil {
-		t.Fatalf("downloadSegment with nil prog: %v", err)
-	}
-	got, _ := os.ReadFile(path)
-	if !bytes.Equal(got, data) {
-		t.Error("nil-progress download produced wrong bytes")
-	}
 }
 
 func noRangeServer(data []byte) *httptest.Server {
@@ -107,6 +49,7 @@ func TestRunRangedParallel(t *testing.T) {
 		URL:         srv.URL + "/file.bin",
 		Output:      out,
 		Connections: 4,
+		ChunkSize:   64 * 1024, // 64 KiB -> 1 MiB / 64 KiB = 16 chunks
 		Client:      srv.Client(),
 	})
 	if err != nil {
@@ -182,8 +125,93 @@ func TestRunRejectsWrongContentRange(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "wrongrange.bin")
 	if _, err := Run(context.Background(), Options{
-		URL: srv.URL + "/file.bin", Output: out, Connections: 2, Client: srv.Client(),
+		URL: srv.URL + "/file.bin", Output: out, Connections: 2, ChunkSize: 2048, Client: srv.Client(),
 	}); err == nil {
 		t.Fatal("expected error when server returns the wrong Content-Range, got nil")
+	}
+}
+
+func TestRunResumesFromManifest(t *testing.T) {
+	data := makeData(40 * 1024) // 40 KiB
+	const cs = 10 * 1024        // 4 chunks
+	var served int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rng := r.Header.Get("Range"); rng != "" && rng != "bytes=0-0" {
+			atomic.AddInt32(&served, 1)
+		}
+		http.ServeContent(w, r, "file.bin", time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "result.bin")
+	part := out + ".part"
+	mpath := out + ".dm"
+
+	// Seed a pre-allocated .part with chunks 0 and 1 written, and a manifest
+	// marking them done (size-only so Validate passes on size alone).
+	w, err := writer.New(part, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.WriteAt(data[0:cs], 0)
+	w.WriteAt(data[cs:2*cs], cs)
+	w.Close()
+
+	mf := manifest.New(mpath, &probe.RemoteInfo{URL: srv.URL + "/file.bin", Size: int64(len(data))}, cs)
+	mf.MarkDone(0)
+	mf.MarkDone(1)
+	if err := mf.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), Options{
+		URL: srv.URL + "/file.bin", Output: out, Connections: 4, ChunkSize: cs, Client: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Resumed {
+		t.Error("expected Resumed=true")
+	}
+	if got := atomic.LoadInt32(&served); got != 2 {
+		t.Errorf("served %d ranged requests, want 2 (only chunks 2 and 3)", got)
+	}
+	final, _ := os.ReadFile(out)
+	if !bytes.Equal(final, data) {
+		t.Error("resumed file is not byte-exact")
+	}
+	if _, err := os.Stat(mpath); !os.IsNotExist(err) {
+		t.Error(".dm manifest not removed after success")
+	}
+}
+
+func TestRunRestartIgnoresStaleManifest(t *testing.T) {
+	data := makeData(40 * 1024)
+	const cs = 10 * 1024
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "file.bin", time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "result.bin")
+	// Stale manifest claiming a different size -> Validate fails -> fresh start.
+	mf := manifest.New(out+".dm", &probe.RemoteInfo{URL: srv.URL + "/file.bin", Size: 999999}, cs)
+	mf.MarkDone(0)
+	mf.Save()
+
+	res, err := Run(context.Background(), Options{
+		URL: srv.URL + "/file.bin", Output: out, Connections: 4, ChunkSize: cs, Client: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Resumed {
+		t.Error("stale manifest (wrong size) should force a fresh start, Resumed=false")
+	}
+	final, _ := os.ReadFile(out)
+	if !bytes.Equal(final, data) {
+		t.Error("restarted file is not byte-exact")
 	}
 }
