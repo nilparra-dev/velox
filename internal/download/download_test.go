@@ -146,4 +146,7 @@ func TestRunSingleStreamFallback(t *testing.T) {
 	if !bytes.Equal(got, data) {
 		t.Errorf("fallback output bytes differ from source")
 	}
+	if _, err := os.Stat(out + ".part"); !os.IsNotExist(err) {
+		t.Errorf(".part file was not removed after finalize")
+	}
 }

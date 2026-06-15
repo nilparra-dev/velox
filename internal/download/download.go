@@ -27,7 +27,7 @@ type Options struct {
 // Result reports the outcome of a download.
 type Result struct {
 	Output      string
-	Size        int64
+	Size        int64 // total bytes; -1 if the server did not report a size
 	Connections int
 	Ranged      bool
 }
@@ -123,6 +123,8 @@ func runSingle(ctx context.Context, client *http.Client, rawURL string, w *write
 }
 
 func copyToWriterAt(r io.Reader, w *writer.Writer, prog ProgressFunc) error {
+	// off starts at 0: the single-stream path fills a file already
+	// pre-allocated to the full size, so byte i of the body is file byte i.
 	buf := make([]byte, bufSize)
 	var off int64
 	for {
