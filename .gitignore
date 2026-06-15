@@ -1,0 +1,23 @@
+# Binaries
+velox
+velox.exe
+/bin/
+/dist/
+
+# Go build / test artifacts
+*.exe
+*.exe~
+*.test
+*.out
+*.prof
+vendor/
+
+# Download artifacts produced by velox at runtime
+*.part
+*.dm
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
